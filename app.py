@@ -2,22 +2,21 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import os # Untuk memeriksa keberadaan file
+import os
 
 # --- Konfigurasi Halaman Streamlit ---
 st.set_page_config(
-    page_title="Anime Explorer & Personal Watchlist (Local)",
+    page_title="Anime Explorer & Personal Watchlist (Non-Persistent)",
     page_icon="🌸",
     layout="wide"
 )
 
 # --- Judul Aplikasi ---
-st.title("🌸 Anime Explorer & Personal Watchlist (Local Edition) 🌸")
+st.title("🌸 Anime Explorer & Personal Watchlist (Non-Persistent Local Edition) 🌸")
 st.markdown("---")
 
-# --- Nama File Data Lokal ---
+# --- Nama File Data Anime Master (Read-Only) ---
 ANIME_DATA_FILE = "anime.csv"
-WATCHLIST_DATA_FILE = "user_watchlist.csv"
 
 # --- Fungsi untuk Memuat Data Anime Master (Read-Only) ---
 @st.cache_data(ttl=3600) # Cache data anime selama 1 jam
@@ -26,11 +25,16 @@ def load_anime_data():
     try:
         df = pd.read_csv(ANIME_DATA_FILE)
 
-        # Konversi tipe data dan bersihkan
-        df['Score'] = pd.to_numeric(df['Score'], errors='coerce')
-        df['Popularity'] = pd.to_numeric(df['Popularity'], errors='coerce')
-        df['Members'] = pd.to_numeric(df['Members'], errors='coerce')
-        df['Episodes'] = pd.to_numeric(df['Episodes'], errors='coerce')
+        # --- PERBAIKAN DI SINI ---
+        # Bersihkan kolom numerik dari karakter non-digit sebelum konversi
+        # Mengganti karakter non-digit (selain titik desimal) dengan kosong
+        for col in ['Score', 'Popularity', 'Members', 'Episodes']:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.replace(r'[^\d.]', '', regex=True) # Hapus semua non-digit kecuali titik
+                df[col] = pd.to_numeric(df[col], errors='coerce') # Konversi ke numerik, error jadi NaN
+            else:
+                st.warning(f"Kolom '{col}' tidak ditemukan di {ANIME_DATA_FILE}. Melewatkan pembersihan.")
+        # --- AKHIR PERBAIKAN ---
 
         df['Genres'] = df['Genres'].apply(lambda x: [g.strip() for g in str(x).split(',') if g.strip()] if pd.notna(x) else [])
         df['Producers'] = df['Producers'].apply(lambda x: [p.strip() for p in str(x).split(',') if p.strip()] if pd.notna(x) else [])
@@ -47,37 +51,12 @@ def load_anime_data():
         st.error(f"Error memuat data anime dari '{ANIME_DATA_FILE}': {e}")
         st.stop()
 
-# --- Fungsi untuk Memuat Data Watchlist Pribadi ---
-@st.cache_data(ttl=60) # Cache data watchlist sebentar karena bisa sering diupdate
-def load_watchlist_data():
-    """Memuat data watchlist dari file CSV lokal, atau membuat DataFrame kosong jika tidak ada."""
-    if os.path.exists(WATCHLIST_DATA_FILE):
-        try:
-            df = pd.read_csv(WATCHLIST_DATA_FILE)
-            # Pastikan kolom Mal ID adalah int/float untuk merge
-            df['Mal ID'] = pd.to_numeric(df['Mal ID'], errors='coerce').astype('Int64') # Int64 untuk handle NaN
-            df['Personal Rating'] = pd.to_numeric(df['Personal Rating'], errors='coerce')
-            return df
-        except Exception as e:
-            st.warning(f"Error memuat watchlist dari '{WATCHLIST_DATA_FILE}': {e}. Membuat watchlist baru.")
-            return pd.DataFrame(columns=['Mal ID', 'Title', 'Status', 'Personal Rating', 'Notes', 'Progress'])
-    else:
-        st.info("File watchlist tidak ditemukan. Membuat watchlist baru.")
-        return pd.DataFrame(columns=['Mal ID', 'Title', 'Status', 'Personal Rating', 'Notes', 'Progress'])
+# --- Inisialisasi Watchlist di Session State (Non-Persistent) ---
+if 'watchlist_data' not in st.session_state:
+    st.session_state.watchlist_data = pd.DataFrame(columns=['Mal ID', 'Title', 'Status', 'Personal Rating', 'Notes', 'Progress'])
 
-# --- Fungsi untuk Menyimpan Data Watchlist Pribadi ---
-def save_watchlist_data(df_watchlist):
-    """Menyimpan DataFrame watchlist ke file CSV lokal."""
-    try:
-        df_watchlist.to_csv(WATCHLIST_DATA_FILE, index=False)
-        st.success("Watchlist berhasil diperbarui dan disimpan!")
-        load_watchlist_data.clear() # Hapus cache agar data terbaru dimuat
-    except Exception as e:
-        st.error(f"Gagal menyimpan watchlist: {e}")
-
-# --- Inisialisasi Data ---
+# --- Inisialisasi Data Anime Master ---
 df_anime = load_anime_data()
-df_watchlist = load_watchlist_data()
 
 # Pastikan df_anime tidak kosong
 if df_anime.empty:
@@ -115,10 +94,10 @@ if page == "Explorer Dashboard":
     max_episodes = col2.slider(
         "Maksimal Episode:",
         min_value=1,
-        max_value=int(df_anime['Episodes'].max()),
-        value=int(df_anime['Episodes'].max())
+        max_value=int(df_anime['Episodes'].max() if pd.notna(df_anime['Episodes'].max()) else 1), # Handle NaN di max
+        value=int(df_anime['Episodes'].max() if pd.notna(df_anime['Episodes'].max()) else 1)
     )
-
+    
     # Filter data berdasarkan pilihan
     filtered_df = df_anime[
         (df_anime['Score'] >= min_score) &
@@ -211,10 +190,9 @@ if page == "Explorer Dashboard":
             st.markdown("---")
             # --- Tambahkan ke Watchlist ---
             if st.button("➕ Tambahkan ke Watchlist"):
-                # Pastikan Mal ID adalah integer untuk perbandingan yang konsisten
                 anime_mal_id = int(anime_detail['Mal ID'])
 
-                if not df_watchlist.empty and anime_mal_id in df_watchlist['Mal ID'].values:
+                if not st.session_state.watchlist_data.empty and anime_mal_id in st.session_state.watchlist_data['Mal ID'].values:
                     st.warning("Anime ini sudah ada di watchlist Anda!")
                 else:
                     new_entry = {
@@ -225,8 +203,7 @@ if page == "Explorer Dashboard":
                         'Notes': '',
                         'Progress': ''
                     }
-                    df_watchlist_temp = pd.concat([df_watchlist, pd.DataFrame([new_entry])], ignore_index=True)
-                    save_watchlist_data(df_watchlist_temp)
+                    st.session_state.watchlist_data = pd.concat([st.session_state.watchlist_data, pd.DataFrame([new_entry])], ignore_index=True)
                     st.success(f"'{anime_detail['Title']}' berhasil ditambahkan ke watchlist Anda!")
                     st.rerun()
     else:
@@ -236,25 +213,20 @@ if page == "Explorer Dashboard":
 elif page == "Personal Watchlist":
     st.header("📝 Personal Watchlist")
 
-    if df_watchlist.empty:
+    if st.session_state.watchlist_data.empty:
         st.info("Watchlist Anda kosong. Tambahkan anime dari 'Explorer Dashboard'.")
     else:
         st.subheader("Daftar Watchlist Anda")
 
-        # Merge dengan df_anime untuk mendapatkan detail lengkap
-        # Hanya merge kolom yang relevan dari df_anime
-        df_watchlist_display = pd.merge(df_watchlist, df_anime[['Mal ID', 'Type', 'Episodes', 'Score', 'Genres']],
-                                        on='Mal ID', how='left') # Tidak perlu join 'Title' karena sudah ada di watchlist
+        df_watchlist_display = pd.merge(st.session_state.watchlist_data, df_anime[['Mal ID', 'Type', 'Episodes', 'Score', 'Genres']],
+                                        on='Mal ID', how='left')
 
-        # Pastikan kolom yang dibutuhkan ada setelah merge
         display_cols = ['Title', 'Status', 'Personal Rating', 'Notes', 'Progress', 'Type', 'Episodes', 'Score']
-        # Handle kasus jika kolom dari df_anime tidak ditemukan setelah merge
         for col in ['Type', 'Episodes', 'Score', 'Genres']:
             if col not in df_watchlist_display.columns:
-                df_watchlist_display[col] = None # Atau nilai default lainnya
+                df_watchlist_display[col] = None
 
-        # Ensure 'Title' is from watchlist for editing consistency
-        df_watchlist_display['Title'] = df_watchlist['Title']
+        df_watchlist_display['Title'] = st.session_state.watchlist_data['Title']
 
         edited_watchlist = st.data_editor(
             df_watchlist_display,
@@ -283,43 +255,25 @@ elif page == "Personal Watchlist":
             num_rows="dynamic",
             key="watchlist_editor"
         )
-
-        if st.button("💾 Simpan Perubahan Watchlist"):
-            # Karena st.data_editor mengembalikan DataFrame yang sudah diubah,
-            # kita hanya perlu memastikan kolom-kolom yang asli tetap ada
-            # dan Mal ID tidak berubah.
-            # Mal ID tidak terlihat di data_editor, jadi kita perlu menggabungkannya kembali.
-            final_watchlist_df = df_watchlist_display[['Mal ID']].merge(
-                edited_watchlist[['Title', 'Status', 'Personal Rating', 'Notes', 'Progress']],
-                left_index=True, right_index=True
-            )
-            # Pastikan Mal ID dan Title diambil dari df_watchlist asli atau df_anime jika diperlukan
-            # Menggunakan Mal ID dari df_watchlist asli agar tidak berubah saat editing
-            final_watchlist_df['Mal ID'] = df_watchlist['Mal ID']
-            final_watchlist_df['Title'] = df_watchlist['Title'] # Pastikan Title tidak berubah
-
-            save_watchlist_data(final_watchlist_df)
-            st.rerun() # Refresh halaman setelah simpan
+        
+        st.session_state.watchlist_data = edited_watchlist[['Mal ID', 'Title', 'Status', 'Personal Rating', 'Notes', 'Progress']]
+        st.info("Perubahan pada watchlist akan hilang saat aplikasi direfresh atau ditutup.")
 
         st.markdown("---")
         st.subheader("Ringkasan Watchlist")
 
-        # Visualisasi Ringkasan Watchlist
         if not edited_watchlist.empty:
-            # Status Distribusi
             status_counts = edited_watchlist['Status'].value_counts()
             fig_status = px.pie(status_counts, values=status_counts.values, names=status_counts.index,
                                 title='Distribusi Status Tontonan', hole=0.3)
             st.plotly_chart(fig_status, use_container_width=True)
 
-            # Rata-rata Rating Pribadi
             avg_rating = edited_watchlist['Personal Rating'].mean()
             if pd.notna(avg_rating):
                 st.metric(label="Rata-rata Rating Pribadi", value=f"{avg_rating:.2f} ⭐")
             else:
                 st.info("Belum ada rating pribadi yang diberikan.")
 
-            # Top 5 Anime dengan Rating Pribadi Tertinggi
             if 'Personal Rating' in edited_watchlist.columns and edited_watchlist['Personal Rating'].notna().any():
                 top_rated = edited_watchlist.sort_values(by='Personal Rating', ascending=False).head(5)
                 st.markdown("### Top 5 Anime dengan Rating Pribadi Tertinggi")
